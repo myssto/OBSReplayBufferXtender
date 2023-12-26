@@ -1,7 +1,10 @@
 import os
 
 import obspython as o
+import psutil
+import win32api
 import win32gui as wgui
+import win32process
 
 
 class ReplayBufferXtender:
@@ -62,6 +65,47 @@ class ReplayBufferXtender:
 
         return w_text.strip()
 
+    def get_focused_window_executable_path(self) -> str:
+        """
+        Uses the win32api and psutil to grab the executable name of the currently focused window
+        """
+
+        # Get the handle for the foreground window
+        hwnd = wgui.GetForegroundWindow()
+
+        # Get the process ID of the window
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+
+        # Get the process path from the process ID
+        process = psutil.Process(pid)
+
+        return process.exe()
+
+    def get_focused_application_name(self) -> str:
+        """
+        Uses the win32api to grab the name of the currently focused application
+        With help from StackOverflow: https://stackoverflow.com/a/31119785
+        """
+
+        exe_path = self.get_focused_window_executable_path()
+
+        try:
+            language, codepage = win32api.GetFileVersionInfo(
+                exe_path, '\\VarFileInfo\\Translation')[0]
+            stringFileInfo = u'\\StringFileInfo\\%04X%04X\\%s' % (
+                language, codepage, "FileDescription")
+            application_name = win32api.GetFileVersionInfo(
+                exe_path, stringFileInfo)
+        except:
+            application_name = ""
+
+        # Sanitize text
+        for char in self.disallowed_chars:
+            if char in application_name:
+                application_name = application_name.replace(char, "")
+
+        return application_name.strip()
+
     def move_video(self) -> None:
         """
         Moves the last file the Replay Buffer created\n
@@ -70,7 +114,11 @@ class ReplayBufferXtender:
         # Get replay path and focused window
         lr_orig_fullpath = self.get_last_replay_path()
         lr_orig_dir, lr_fname = os.path.split(lr_orig_fullpath)
-        sub_dir = self.get_focused_window_name()
+
+        # First try to get the name from the executable's version information resource
+        # If that fails, try to get the name from the window text
+        sub_dir = self.get_focused_application_name()
+        sub_dir = sub_dir if sub_dir != "" else self.get_focused_window_name()
 
         if not sub_dir:
             if self.use_windowsapps:
