@@ -2,9 +2,9 @@ import os
 
 import obspython as o
 import psutil
-import win32api
+import win32api as wapi
 import win32gui as wgui
-import win32process
+import win32process as wproc
 
 
 class ReplayBufferXtender:
@@ -52,18 +52,14 @@ class ReplayBufferXtender:
 
     def get_focused_window_name(self) -> str:
         """
-        Uses the win32api to grab the name of the currently focused window
+        Uses the win32api to grab the display name of the currently focused window
         """
 
         # Get the window text
         w_text = wgui.GetWindowText(wgui.GetForegroundWindow())
 
-        # Sanitize window text
-        for char in self.disallowed_chars:
-            if char in w_text:
-                w_text = w_text.replace(char, "")
-
-        return w_text.strip()
+        # Sanitize text and return
+        return self.sanitize_string(w_text)
 
     def get_focused_window_executable_path(self) -> str:
         """
@@ -74,7 +70,7 @@ class ReplayBufferXtender:
         hwnd = wgui.GetForegroundWindow()
 
         # Get the process ID of the window
-        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        _, pid = wproc.GetWindowThreadProcessId(hwnd)
 
         # Get the process path from the process ID
         process = psutil.Process(pid)
@@ -83,36 +79,42 @@ class ReplayBufferXtender:
 
     def get_focused_application_name(self) -> str:
         """
-        Uses the win32api to grab the name of the currently focused application
+        Uses the win32api to grab the name of the currently focused window using file version info
         With help from StackOverflow: https://stackoverflow.com/a/31119785
         """
 
         exe_path = self.get_focused_window_executable_path()
 
         try:
-            language, codepage = win32api.GetFileVersionInfo(
+            language, codepage = wapi.GetFileVersionInfo(
                 exe_path, '\\VarFileInfo\\Translation')[0]
             stringFileInfo = u'\\StringFileInfo\\%04X%04X\\%s' % (
                 language, codepage, "FileDescription")
-            application_name = win32api.GetFileVersionInfo(
+            application_name = wapi.GetFileVersionInfo(
                 exe_path, stringFileInfo)
         except:
             application_name = ""
 
-        # Sanitize text
-        for char in self.disallowed_chars:
-            if char in application_name:
-                application_name = application_name.replace(char, "")
+        # Sanitize text and return
+        return self.sanitize_string(application_name)
 
-        return application_name.strip()
+    def sanitize_string(self, txt: str) -> str:
+        """
+        Removes chars from strings that are disallowed in Windows file names
+        """
+        for char in self.disallowed_chars:
+            if char in txt:
+                txt = txt.replace(char, "")
+        return txt.strip()
 
     def move_video(self) -> None:
         """
         Moves the last file the Replay Buffer created\n
         into `base_dir\\{cur_win_name}\\base_name`
         """
-        # Get replay path and focused window
+        # Get last replay path
         lr_orig_fullpath = self.get_last_replay_path()
+        # Parse into directory and file name
         lr_orig_dir, lr_fname = os.path.split(lr_orig_fullpath)
 
         # First try to get the name from the executable's version information resource
@@ -120,27 +122,33 @@ class ReplayBufferXtender:
         sub_dir = self.get_focused_application_name()
         sub_dir = sub_dir if sub_dir != "" else self.get_focused_window_name()
 
+        # Cases where no valid window name is found
         if not sub_dir:
+            # Use "Windowsapps" as a placeholder
             if self.use_windowsapps:
                 sub_dir = "Windowsapps"
+            # Place the file in the base directory and bail out
             elif self.base_dir:
-                os.rename(lr_orig_fullpath, os.path.join(self.base_dir, lr_fname))
+                os.rename(lr_orig_fullpath, os.path.join(
+                    self.base_dir, lr_fname))
                 return
-            return
 
+        # Replace the word "Replay" in the file name with the window name
         if self.prepend_window_name:
             lr_fname = lr_fname.replace("Replay", sub_dir)
 
-        # Parse out directories
+        # Determine base directory
         if self.base_dir:
             lr_base_dir = self.base_dir
         else:
             lr_base_dir = lr_orig_dir
 
+        # Create final directory
         lr_dir = os.path.join(lr_base_dir, sub_dir)
         if not os.path.exists(lr_dir):
             os.mkdir(lr_dir)
 
+        # Move the file
         os.rename(lr_orig_fullpath, os.path.join(lr_dir, lr_fname))
 
 
@@ -187,7 +195,6 @@ def script_properties() -> any:
         name="useWindowsapps",
         description="Use Windowsapps for Unknown Programs"
     )
-
 
     # Option to prepend the window name to the replay file like Shadowplay
     # Will replace the default "Replay" text from the file name
