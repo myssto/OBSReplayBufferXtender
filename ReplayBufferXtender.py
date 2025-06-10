@@ -1,10 +1,129 @@
+from abc import ABC, abstractmethod
 import os
-
+import platform
+import subprocess
 import obspython as o
-import psutil
-import win32api as wapi
-import win32gui as wgui
-import win32process as wproc
+
+
+class WindowNameResolver(ABC):
+    """
+    Base class for window name resolution handler
+    """
+
+    disallowed_chars: list[str] = []
+
+    def __init__(self) -> None:
+        pass
+
+    @abstractmethod
+    def get_focused_window_name(self) -> str:
+        """
+        Gets the name of the window currently in focus
+        """
+        pass
+
+    def sanitize_string(self, txt: str) -> str:
+        """
+        Removes chars from strings that are disallowed in file names
+        """
+        for char in self.disallowed_chars:
+            txt = txt.replace(char, "")
+        return txt.strip()
+
+
+class WindowsWindowNameResolver(WindowNameResolver):
+    """
+    Handles window name resolution on Windows platforms
+    """
+
+    psutil = None
+    wapi = None
+    wgui = None
+    wproc = None
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        # Load windows-specific modules
+        import psutil
+        import win32api as wapi
+        import win32gui as wgui
+        import win32process as wproc
+
+        self.psutil = psutil
+        self.wapi = wapi
+        self.wgui = wgui
+        self.wproc = wproc
+
+        self.disallowed_chars = ["\\", "/", ":", '*',
+                                 "?", '"', "<", ">", "|", ".exe", "$"]
+
+    def get_focused_window_name(self) -> str:
+        return self.sanitize_string(self.get_application_name() or self.get_window_display_name())
+
+    def get_application_name(self) -> str:
+        """
+        Gets the name of the window in focus by inspecting file version info.
+        Generally yields better results than get_window_display_name when available.
+
+        See https://stackoverflow.com/a/31119785
+        """
+        application_name = ""
+
+        # Get the process ID of the window in focus
+        _, pid = self.wproc.GetWindowThreadProcessId(
+            self.wgui.GetForegroundWindow())
+
+        # Get the path to the window's executable
+        exe_path = self.psutil.Process(pid).exe()
+
+        try:
+            language, codepage = self.wapi.GetFileVersionInfo(
+                exe_path, '\\VarFileInfo\\Translation')[0]
+            stringFileInfo = u'\\StringFileInfo\\%04X%04X\\%s' % (
+                language, codepage, "FileDescription")
+            application_name = self.wapi.GetFileVersionInfo(
+                exe_path, stringFileInfo)
+        except:
+            pass
+
+        return application_name
+
+    def get_window_display_name(self) -> str:
+        """
+        Gets the literal display name of the window in focus using win32api
+        """
+        return self.wgui.GetWindowText(self.wgui.GetForegroundWindow())
+
+
+class LinuxWindowNameResolver(WindowNameResolver):
+    """
+    Handles window name resolution on Linux platforms
+    """
+
+    IS_FLATPAK = "FLATPAK_ID" in os.environ or os.path.exists("/.flatpak-info")
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.disallowed_chars = ["/"]
+
+    def get_focused_window_name(self) -> str:
+        # If running from the flatpak sandbox, we need to run xprop from the host shell
+        args = ["flatpak-spawn", "--host"] if self.IS_FLATPAK else []
+        window_title = ""
+
+        try:
+            # Get active window ID
+            window_id = subprocess.check_output(
+                [*args, "xprop", "-root", "_NET_ACTIVE_WINDOW"]).decode().split()[-1]
+            # Get the window title, sanitize UTF-8 and escaped strings
+            window_title = subprocess.check_output(
+                [*args, "xprop", "-id", window_id, "WM_NAME"]).decode().strip().split('=', 1)[-1].strip(' "')
+        except:
+            pass
+
+        return self.sanitize_string(window_title)
 
 
 class ReplayBufferXtender:
@@ -12,14 +131,15 @@ class ReplayBufferXtender:
     All main script logic lives here
     """
 
+    # Script settings
     base_dir = None
     prepend_window_name = True
-    use_windowsapps = True
-    disallowed_chars = ["\\", "/", ":", '*',
-                        "?", '"', "<", ">", "|", ".exe", "$"]
 
     def __init__(self) -> None:
-        pass
+        if (platform.system() == "Linux"):
+            self.window_resolver = LinuxWindowNameResolver()
+        else:
+            self.window_resolver = WindowsWindowNameResolver()
 
     def event_handler(self, event, *_) -> None:
         """
@@ -50,63 +170,6 @@ class ReplayBufferXtender:
         o.obs_output_release(replay_buffer)
         return path
 
-    def get_focused_window_name(self) -> str:
-        """
-        Uses the win32api to grab the display name of the currently focused window
-        """
-
-        # Get the window text
-        w_text = wgui.GetWindowText(wgui.GetForegroundWindow())
-
-        # Sanitize text and return
-        return self.sanitize_string(w_text)
-
-    def get_focused_window_executable_path(self) -> str:
-        """
-        Uses the win32api and psutil to grab the executable name of the currently focused window
-        """
-
-        # Get the handle for the foreground window
-        hwnd = wgui.GetForegroundWindow()
-
-        # Get the process ID of the window
-        _, pid = wproc.GetWindowThreadProcessId(hwnd)
-
-        # Get the process path from the process ID
-        process = psutil.Process(pid)
-
-        return process.exe()
-
-    def get_focused_application_name(self) -> str:
-        """
-        Uses the win32api to grab the name of the currently focused window using file version info
-        With help from StackOverflow: https://stackoverflow.com/a/31119785
-        """
-
-        exe_path = self.get_focused_window_executable_path()
-
-        try:
-            language, codepage = wapi.GetFileVersionInfo(
-                exe_path, '\\VarFileInfo\\Translation')[0]
-            stringFileInfo = u'\\StringFileInfo\\%04X%04X\\%s' % (
-                language, codepage, "FileDescription")
-            application_name = wapi.GetFileVersionInfo(
-                exe_path, stringFileInfo)
-        except:
-            application_name = ""
-
-        # Sanitize text and return
-        return self.sanitize_string(application_name)
-
-    def sanitize_string(self, txt: str) -> str:
-        """
-        Removes chars from strings that are disallowed in Windows file names
-        """
-        for char in self.disallowed_chars:
-            if char in txt:
-                txt = txt.replace(char, "")
-        return txt.strip()
-
     def move_video(self) -> None:
         """
         Moves the last file the Replay Buffer created\n
@@ -119,19 +182,7 @@ class ReplayBufferXtender:
 
         # First try to get the name from the executable's version information resource
         # If that fails, try to get the name from the window text
-        sub_dir = self.get_focused_application_name()
-        sub_dir = sub_dir if sub_dir != "" else self.get_focused_window_name()
-
-        # Cases where no valid window name is found
-        if not sub_dir:
-            # Use "Windowsapps" as a placeholder
-            if self.use_windowsapps:
-                sub_dir = "Windowsapps"
-            # Place the file in the base directory and bail out
-            elif self.base_dir:
-                os.rename(lr_orig_fullpath, os.path.join(
-                    self.base_dir, lr_fname))
-                return
+        sub_dir = self.window_resolver.get_focused_window_name() or "Unknown"
 
         # Replace the word "Replay" in the file name with the window name
         if self.prepend_window_name:
@@ -163,7 +214,7 @@ def script_description() -> str:
     Attempts to emulate the file naming conventions of Nvidia Shadowplay as closely as possible!</p>
 
     <p><br><b>Author: Myssto</b>
-    <br><a href=https://github.com/myssto/OBSReplayBufferXtender/tree/main#obsreplaybufferxtender>Github Documentation</a></p>
+    <br><a href=https://github.com/myssto/OBSReplayBufferXtender>Github</a></p>
     </center>
     """
 
@@ -189,13 +240,6 @@ def script_properties() -> any:
         default_path=None
     )
 
-    # Option to send unknown window names to a Windowsapps directory
-    o.obs_properties_add_bool(
-        props=p,
-        name="useWindowsapps",
-        description="Use Windowsapps for Unknown Programs"
-    )
-
     # Option to prepend the window name to the replay file like Shadowplay
     # Will replace the default "Replay" text from the file name
     o.obs_properties_add_bool(
@@ -210,12 +254,6 @@ def script_properties() -> any:
 def script_defaults(s) -> None:
     o.obs_data_set_default_bool(
         data=s,
-        name="useWindowsapps",
-        val=ReplayBufferXtender.use_windowsapps
-    )
-
-    o.obs_data_set_default_bool(
-        data=s,
         name="prependWindowName",
         val=ReplayBufferXtender.prepend_window_name
     )
@@ -223,7 +261,6 @@ def script_defaults(s) -> None:
 
 def script_update(s) -> None:
     inst.base_dir = o.obs_data_get_string(s, "baseSavePath")
-    inst.use_windowsapps = o.obs_data_get_bool(s, "useWindowsapps")
     inst.prepend_window_name = o.obs_data_get_bool(s, "prependWindowName")
 
 
